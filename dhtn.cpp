@@ -332,6 +332,18 @@ forward(dhtmsg_t *dhtmsg)
      this by setting the highest bit in the type field of the message
      using DHTM_ATLOC.
   */
+	int err;
+	dhtmsg_t fwdmsg;
+	memcpy((char *) &fwdmsg, (char *) dhtmsg, sizeof(dhtmsg_t));
+	dhtnode_t * joining = &dhtmsg->dhtm_node;
+	if ( ID_inrange(joining->dhtn_ID, self.dhtn_ID, fingers[0].dhtn_ID) ) {
+		fwdmsg.dhtm_type |= DHTM_ATLOC;
+	}
+	
+	int sd = connremote(&fingers[0].dhtn_addr, fingers[0].dhtn_port);
+	err = send(sd, (char *) &fwdmsg, sizeof(dhtmsg_t), 0);
+	net_assert((err != sizeof(dhtmsg_t)), "dhtn::forward: send");
+	
   /* After we've forwarded the message along, we don't immediately close
      the connection as usual.  Instead, we wait for any DHTM_REDRT message
      telling us that we have overshot in our range expectation (see
@@ -341,8 +353,36 @@ forward(dhtmsg_t *dhtmsg)
      the new successor. We repeat this until we stop getting
      DHTM_REDRT message.
   */
+	dhtmsg_t redrtmsg;
+	int bytes = 0;
+	do {
+		/* receive any DHTM_REDRT message */
+		err = recv(sd, (char *) ((&redrtmsg)+bytes), sizeof(dhtmsg_t), 0);
+		if (err <= 0) { // connection closed or error
+			close(sd);
+			break;
+		} 
+		bytes += err;
+	} while (bytes < (int) sizeof(dhtmsg_t));
+	
+	if ( err > 0 ) close(sd);
+	if ( bytes == sizeof(dhtmsg_t) ) {
+		memcpy((char *) &fingers[0], (char *) &redrtmsg.dhtm_node, sizeof(dhtnode_t));
+		forward(dhtmsg);
+	}
+	return;
+}
 
-  return;
+void mkmsg(dhtmsg_t * msg, int type, dhtnode_t * node) {
+	msg->dhtm_vers = NETIMG_VERS;
+	msg->dhtm_type = type;
+	msg->dhtm_ttl = htons(DHTM_TTL);
+	if ( node ) {
+		memcpy((char *) &msg->dhtm_node, (char *) node, sizeof(dhtnode_t));
+	} else {
+		memset((char *) &msg->dhtm_node, 0, sizeof(dhtnode_t));
+	}
+	return;
 }
 
 /*
@@ -360,6 +400,21 @@ handlejoin(int sender, dhtmsg_t *dhtmsg)
      self.  If so, send back to joining node a REID message.  See
      dhtn.h for packet format.
   */
+	int err = 0;
+	dhtnode_t * joining = &(dhtmsg->dhtm_node);
+	if ( joining->dhtn_ID == self.dhtn_ID || joining->dhtn_ID == pred.dhtn_ID ) {
+		close(sender);
+		
+		dhtmsg_t reidmsg;
+		mkmsg( &reidmsg, DHTM_REID, NULL );
+		
+		int sd = connremote( &joining->dhtn_addr, joining->dhtn_port);
+		err = send(sd, (char *) &reidmsg, sizeof(dhtmsg_t), 0);
+		net_assert((err != sizeof(dhtmsg_t)), "dhtn::reid: send");
+		close(sd);
+		return;
+	}
+	
   /* Otherwise, next check if ID is in range (pred.dhtn_ID,
      self.dhtn_ID].  If so, send a welcome message to joining node,
      with the current node as the joining node's successor and the
@@ -373,7 +428,30 @@ handlejoin(int sender, dhtmsg_t *dhtmsg)
      first/only node in the identifier circle, as indicated by its ID
      being the same as that of its successor's ID, set both its
      successor and predecessor to the new joining node.
+	
   */
+	if ( ID_inrange(joining->dhtn_ID, pred.dhtn_ID, self.dhtn_ID) ) {
+		close(sender);
+		
+		dhtmsg_t wlcmmsg;
+		mkmsg( &wlcmmsg, DHTM_WLCM, &self );
+		
+		int sd = connremote( &joining->dhtn_addr, joining->dhtn_port);
+		err = send(sd, (char *) &wlcmmsg, sizeof(dhtmsg_t), 0);
+		net_assert((err != sizeof(dhtmsg_t)), "dhtn:wlcm: send");
+		err = send(sd, (char *) &pred, sizeof(dhtnode_t), 0);
+		net_assert((err != sizeof(dhtnode_t)), "dhtn:wlcm: send");
+		
+		memcpy((char *) &pred, (char *) joining, sizeof(dhtnode_t));
+		if ( self.dhtn_ID == fingers[0].dhtn_ID ) {
+			// current node is the first/only node in the identifier circle,
+			// set both its successor and predecessor to the new joining node
+			memcpy((char *) &fingers[0], (char *) joining, sizeof(dhtnode_t));
+		}
+		close(sd);
+		return;
+	}
+	
   /* Otherwise, next check if sender expects the joining node's ID to
      be in range even though it failed our own test.  Sender indicates
      its expectation by setting the highest order bit of the type
@@ -388,6 +466,14 @@ handlejoin(int sender, dhtmsg_t *dhtmsg)
      message to the sender of the current JOIN packet.  Again, see
      dhtn.h for packet format.
   */
+	if ( dhtmsg->dhtm_type & DHTM_ATLOC ) {
+		dhtmsg_t redrtmsg;
+		mkmsg( &redrtmsg, DHTM_REDRT, &pred );
+		err = send(sender, (char *) &redrtmsg, sizeof(dhtmsg_t), 0);
+		net_assert((err != sizeof(dhtmsg_t)), "dhtn:redrt: send");
+		close(sender);
+		return;
+	}
   /* Finally, if none of the above applies, we forward the JOIN
      message to the next node, which in Lab 4 is just the successor
      node.  For programming assignment 2, we'll use the finger table
@@ -395,6 +481,8 @@ handlejoin(int sender, dhtmsg_t *dhtmsg)
      should call dhtn::forward() to perform the forwarding task.
      Don't forget to close the sender socket when you don't need it anymore.
   */
+	close(sender);
+	forward(dhtmsg);
 
   return;
 }
