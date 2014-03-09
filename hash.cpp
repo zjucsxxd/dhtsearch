@@ -61,7 +61,6 @@ ID(unsigned char *md)
 }
 
 /*
- * Task 1: 
  * ID_inrange(ID, begin, end), return true (1) if ID is in the range (begin, end], i.e.,
  * begin < ID <= end.  The variables are all modulo NETIMG_IDMAX+1.
  * For example, ID=6 for begin=250, end=10 should return true (1).
@@ -70,7 +69,7 @@ ID(unsigned char *md)
 int
 ID_inrange(unsigned char ID, unsigned char begin, unsigned char end)
 {
-  /* YOUR CODE HERE */
+  /* YOUR LAB 3 CODE HERE */
 	return ((begin < ID && ID <= end) || (begin >= end && ( begin < ID || ID <= end )));
 }
 

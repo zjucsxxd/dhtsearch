@@ -35,7 +35,8 @@
 
 typedef struct dhtnode_s dhtnode_t;
 struct dhtnode_s {
-  u_short dhtn_ID;
+	unsigned char dhtn_rsvd;
+	unsigned char dhtn_ID;
   u_short dhtn_port;        // port#, always stored in network byte order
   struct in_addr dhtn_addr; // IPv4 address
 };
