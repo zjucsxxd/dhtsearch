@@ -169,6 +169,7 @@ void dhtn::setID(int id) {
 	return;
 }
 
+// TODO
 /*
  * dhtn default constructor.
  * If given id is valid, i.e., in [0, 255],
@@ -177,7 +178,7 @@ void dhtn::setID(int id) {
  * uninitialized (dhtn_port == 0).
  * Initialize member variables fqdn and port to provide command-line interface (cli) values.
  */
-dhtn::dhtn(int id, char *cli_fqdn, u_short cli_port) {
+dhtn::dhtn(int id, char *cli_fqdn, u_short cli_port, char * imagefolder) {
 	fqdn = cli_fqdn;
 	port = cli_port;
 	setID(id);
@@ -190,18 +191,22 @@ dhtn::dhtn(int id, char *cli_fqdn, u_short cli_port) {
  * Set both predecessor and successor (fingers[0]) to be "self".
  */
 void dhtn::first() {
-	pred = fingers[0] = self;
+	for ( int i = 0; i < DHTN_FINGERS+1; i++ ) {
+		fingers[i] = self;
+	}
+	return;
 }
 
 /*
- * refID: called when the dht tells us that our ID collides
+ * reID: called when the dht tells us that our ID collides
  * with that of an existing node. We simply closes the listen 
  * socket and call setID() to grab a new ephemeral port and 
  * a corresponding new ID
  */
-void dhtn::refID() {
+void dhtn::reID() {
 	close(listen_sd);
 	setID(((int) NETIMG_IDMAX)+1);
+	return;
 }
 
 /*
@@ -308,6 +313,22 @@ int recvbysize(int sd, char * buffer, unsigned int size) {
 		bytes += recvd;
 	} while (bytes < (int)size);
 	return recvd;
+}
+
+/* forward based on provided id (which is either node ID for a
+ * join message or image ID for a searcj message). The second
+ * argument could actually be a pointer to a dhtsrch_t that is cast
+ * to a dhtmsg_t. So the third argument tells the actual size of
+ * the packet pointed to by the second argument.
+ */
+void dhtn::forward(unsigned char id, dhtmsg_t *dhtmsg, int size) {
+	if ( size == sizeof(dhtmsg_t) ) {
+		
+	} else if ( size == sizeof(dhtsrch_t) ) {
+		dhtsrch_t * dhtsrch = (dhtsrch_t *) dhtmsg;
+		
+	}
+	return;
 }
 
 void dhtn::forward(dhtmsg_t *dhtmsg) {
@@ -418,6 +439,12 @@ void dhtn::handlejoin(int sender, dhtmsg_t *dhtmsg) {
 	return;
 }
 
+// TODO
+void dhtn::handlesearch(int sender, dhtsrch_t * dhtsrch) {
+	
+	return;
+}
+
 /* handlepkt: receive and parse packet.
  * The argument "sender" is the socket where the connection has been established.
  * First receive a packet from the sender. Then depending on the packet type,
@@ -460,6 +487,30 @@ void dhtn::handlepkt(int sender) {
 		}
 	}
 
+	return;
+}
+
+// TODO
+void dhtn::fixup(int idx) {
+	
+	return;
+}
+
+// TODO
+void dhtn::fixdn(int idx) {
+	
+	return;
+}
+
+// TODO
+void dhtn::sendimg(int found) {
+	
+	return;
+}
+
+// TODO
+void dhtn::sendREDRT(int sender, dhtmsg_t * dhtmsg, int size) {
+	
 	return;
 }
 
