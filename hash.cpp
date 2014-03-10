@@ -70,7 +70,7 @@ int
 ID_inrange(unsigned char ID, unsigned char begin, unsigned char end)
 {
   /* YOUR LAB 3 CODE HERE */
-     return (0);
+     return ((begin < ID && ID <= end) || (begin >= end && (begin < ID || ID <= end)));
 }
 
 /*
