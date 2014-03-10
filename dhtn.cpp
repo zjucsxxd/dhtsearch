@@ -52,8 +52,10 @@ using namespace std;
 #include <GL/glut.h>
 #endif
 
+/**************************TOOL FUNCTIONS***************************/
 void dhtn_usage(char *progname) {
 	//TODO
+	fprintf(stderr, "Usage: %s [-p <FQDN:port> -I nodeID]\n", progname);
 	exit(1);
 }
 
@@ -70,7 +72,7 @@ int dhtn_args(int argc, char * argv[],
 	net_assert(!cli_port, "dhtn_args: cli_port not allocated");
 	net_assert(!id, "dhtn_args: id not allocated");
 	
-	*id = ((int) NET_IDMAX) + 1;
+	*id = ((int) NETIMG_IDMAX) + 1;
 	
 	while ((c = getopt(argc, argv, "p:I:")) != EOF) {
 		switch (c) {
@@ -90,13 +92,50 @@ int dhtn_args(int argc, char * argv[],
 			net_assert((*id < 0 || *id > ((int) NETIMG_IDMAX)), "dhtn_args: id out of range");
 			break;
 		default:
+			return 1;
 			break;
 		}
 	}
 	
-	return (imgdb->cli(argc, argv));
+	return 0;
+	//return (imgdb->cli(argc, argv));
 }
 
+int recvbysize(int sd, char * buffer, unsigned int size) {
+	int recvd, bytes = 0;
+	do {
+		recvd = recv(sd, buffer+bytes, size-bytes, 0);
+		if ( recvd <= 0 ) {
+			close(sd);
+			break;
+		}
+		bytes += recvd;
+	} while (bytes < (int)size);
+	return recvd;
+}
+
+void mkmsg(dhtmsg_t * msg, int type, dhtnode_t * node) {
+	msg->dhtm_vers = NETIMG_VERS;
+	msg->dhtm_type = type;
+	msg->dhtm_ttl = htons(DHTM_TTL);
+	if ( node ) {
+		memcpy((char *) &msg->dhtm_node, (char *) node, sizeof(dhtnode_t));
+	} else {
+		memset((char *) &msg->dhtm_node, 0, sizeof(dhtnode_t));
+	}
+	return;
+}
+
+void printFingers(dhtnode_t * self, dhtnode_t fingers[]) {
+	printf("***FINGER TABLE***\n");
+	printf("  self:\t\t%d\n", self->dhtn_ID);
+	for ( int i = 0; i < DHTN_FINGERS+1; i++ ) {
+		printf("  %d:\t\t%d\n", i, fingers[i].dhtn_ID);
+	}
+	return;
+}
+
+/*********************IMPLEMENTATION OF DHTN************************/
 /*
  * setID: sets up a TCP socket listening for connection.
  * Let the call to bind() assign an ephemeral port to this listening socket.
@@ -110,6 +149,7 @@ int dhtn_args(int argc, char * argv[],
  * Returns the bound socket id.
  */
 void dhtn::setID(int id) {
+	cout << "entering dhtn::setID()...\n";
 	int err, len;
 	struct sockaddr_in node;
 	char sname[NETIMG_MAXFNAME] = { 0 };
@@ -122,7 +162,7 @@ void dhtn::setID(int id) {
 	net_assert((listen_sd < 0), "dhtn::setID: socket");
 	
 	memset((char *) &node, 0, sizeof(struct sockaddr_in));
-	node.sin_family = AF_INET:
+	node.sin_family = AF_INET;
 	node.sin_addr.s_addr = INADDR_ANY;
 	node.sin_port =0;
 	
@@ -150,7 +190,7 @@ void dhtn::setID(int id) {
 	/* store the host's address and assigned port number in the "self" member variable */
 	self.dhtn_port = node.sin_port;
 	hp = gethostbyname(sname);
-	het_assert((hp == 0), "dhtn::setID: gethostbyname");
+	net_assert((hp == 0), "dhtn::setID: gethostbyname");
 	memcpy(&self.dhtn_addr, hp->h_addr, hp->h_length);
 	
 	/* if id is not valid, compute id from SHA1 hash of address+port */
@@ -182,8 +222,20 @@ dhtn::dhtn(int id, char *cli_fqdn, u_short cli_port, char * imagefolder) {
 	fqdn = cli_fqdn;
 	port = cli_port;
 	setID(id);
-	pred.dhtn_port = 0;
-	fingers[0].dhtn_port = 0;
+	for ( int i = 0; i < DHTN_FINGERS+1; i++ ) {
+		fingers[i].dhtn_port = 0;
+		fingers[i].dhtn_ID = 0;
+	}
+
+	int pow = 1;
+	for ( int i = 0; i < DHTN_FINGERS; i++ ) {
+		fID[i] = pow;
+		pow *= 2;
+	}
+	
+	//dhtn_imgdb.setfolder(imagefolder);
+	
+	return;
 }
 
 /*
@@ -191,9 +243,11 @@ dhtn::dhtn(int id, char *cli_fqdn, u_short cli_port, char * imagefolder) {
  * Set both predecessor and successor (fingers[0]) to be "self".
  */
 void dhtn::first() {
+	cout << "entering dhtn::first()...\n";
 	for ( int i = 0; i < DHTN_FINGERS+1; i++ ) {
-		fingers[i] = self;
+		memcpy((char *) &(fingers[i]), (char *) &self, sizeof(dhtnode_t));
 	}
+	//printFingers(&self, fingers);
 	return;
 }
 
@@ -229,7 +283,7 @@ int dhtn::connremote(struct in_addr *addr, u_short portnum) {
 	remote.sin_family = AF_INET;
 	remote.sin_port = portnum;
 	if ( addr ) {
-		memcpy(*remote.sin_addr, addr, sizeof(struct in_addr));
+		memcpy(&remote.sin_addr, addr, sizeof(struct in_addr));
 	} else {
 		/* obtain remote host's IPv4 address from fqdn and initialize the
 		 * socket address with remote host's address. */
@@ -294,25 +348,12 @@ int dhtn:: acceptconn() {
 	net_assert(err, "dhtn::acceptconn: setsockopt SO_LINGER");
 	
 	/* inform user of connection */
-	cp = gethostbyaddr((char *) &sender.sin_addr, sizeof(struct in_addr) AF_INET);
+	cp = gethostbyaddr((char *) &sender.sin_addr, sizeof(struct in_addr), AF_INET);
 	fprintf(stderr, "Connected from node %s:%d\n",
 		((cp && cp->h_name) ? cp->h_name : inet_ntoa(sender.sin_addr)),
 		ntohs(sender.sin_port));
 	
 	return td;
-}
-
-int recvbysize(int sd, char * buffer, unsigned int size) {
-	int recvd, bytes = 0;
-	do {
-		recvd = recv(sd, buffer+bytes, size-bytes, 0);
-		if ( status <= 0 ) {
-			close(sender);
-			break;
-		}
-		bytes += recvd;
-	} while (bytes < (int)size);
-	return recvd;
 }
 
 /* forward based on provided id (which is either node ID for a
@@ -322,79 +363,68 @@ int recvbysize(int sd, char * buffer, unsigned int size) {
  * the packet pointed to by the second argument.
  */
 void dhtn::forward(unsigned char id, dhtmsg_t *dhtmsg, int size) {
+	cout << "entering dhtn::forward()...\n";
 	if ( size == sizeof(dhtmsg_t) ) {
+		//TODO: subject to change
+		/* First check whether we expect the joining node's ID, as contained
+		 * in the JOIN message, to fall within the range (self.dhtn_ID, 
+		 * fingers[0].dhtn_ID]. If so, we inform the node we are sending
+		 * the JOIN message to that we expect it to be our successor. We do
+		 * this by setting the highest bit in the type field of the message
+		 * using DHTM_ATLOC. */
+		int err;
+		dhtmsg_t fwdmsg;
+		memcpy((char *) &fwdmsg, (char *) dhtmsg, sizeof(dhtmsg_t));
+		//dhtnode_t * joining = &dhtmsg->dhtm_node;
+		if (ID_inrange(/*joining->dhtn_ID*/id, self.dhtn_ID, fingers[0].dhtn_ID)) {
+			fwdmsg.dhtm_type |= DHTM_ATLOC;
+		}
+		
+		int sd = connremote(&(fingers[0].dhtn_addr), fingers[0].dhtn_port);
+		err = send(sd, (char *) &fwdmsg, sizeof(dhtmsg_t), 0);
+		net_assert((err != sizeof(dhtmsg_t)), "dhtn::forward: send");
+	
+		/* After we've forwarded the message along, we don't immediately close
+		 * the connection as usual. Instead, we wait for any DHTM_REDRT message
+		 * telling us that we have overshot in our range expectation (see the
+		 * third case in dhtn::handlejoin()). Such a message comes with a 
+		 * suggested new successor, we copy this suggested new successor to 
+		 * our fingers[0] and try to forward the JOIN message again to the 
+		 * new successor. We repeat this until we stop getting DHTM_REDRT
+		 * message. */
+		dhtmsg_t redrtmsg;
+		int recvd = recvbysize(sd, (char *) &redrtmsg, sizeof(dhtmsg_t));
+		close(sd);
+		if ( recvd > 0 ) {
+			memcpy((char *) &fingers[0], (char *) &redrtmsg.dhtm_node, sizeof(dhtnode_t));
+			forward(id, dhtmsg, sizeof(dhtmsg_t));
+		}
 		
 	} else if ( size == sizeof(dhtsrch_t) ) {
 		dhtsrch_t * dhtsrch = (dhtsrch_t *) dhtmsg;
 		
 	}
-	return;
-}
-
-void dhtn::forward(dhtmsg_t *dhtmsg) {
-	//TODO: subject to change
-	/* First check whether we expect the joining node's ID, as contained
-	 * in the JOIN message, to fall within the range (self.dhtn_ID, 
-	 * fingers[0].dhtn_ID]. If so, we inform the node we are sending
-	 * the JOIN message to that we expect it to be our successor. We do
-	 * this by setting the highest bit in the type field of the message
-	 * using DHTM_ATLOC. */
-	int err;
-	dhtmsg_t fwdmsg;
-	memcpy((char *) &fwdmsg, (char *) dhtmsg, sizeof(dhtmsg_t));
-	dhtnode_t * joining = &dhtmsg->dhtm_node;
-	if (ID_inrange(joining->dhtn_ID, self.dhtn_ID, fingers[0].dhtn_ID)) {
-		fwdmsg.dhtm_type |= DHTM_ATLOC;
-	}
 	
-	int sd = connremote(&fingers[0].dhtn_addr, fingers[0].dhtn_port){;
-	err = send(sd, (char *) &fwdmsg, sizeof(dhtmsg_t), 0);
-	net_assert((err != sizeof(dhtmsg_t)), "dhtn::forward: send");
-	
-	/* After we've forwarded the message along, we don't immediately close
-	 * the connection as usual. Instead, we wait for any DHTM_REDRT message
-	 * telling us that we have overshot in our range expectation (see the
-	 * third case in dhtn::handlejoin()). Such a message comes with a 
-	 * suggested new successor, we copy this suggested new successor to 
-	 * our fingers[0] and try to forward the JOIN message again to the 
-	 * new successor. We repeat this until we stop getting DHTM_REDRT
-	 * message. */
-	dhtmsg_t redrtmsg;
-	int recvd = recvbysize(sd, (char *) &redrtmsg, sizeof(dhtmsg_t));
-	close(sd);
-	if ( recvd > 0 ) {
-		memcpy((char *) &fingers[0], (char *) &redrtmsg.dhtm_node, sizeof(dhtnode_t));
-		forward(dhtmsg);
-	}
-
-	return;
-}
-
-void mkmsg(dhtmsg_t * msg, int type, dhtnode_t * node) {
-	msg->dhtm_vers = NETIMG_VERS;
-	msg->dhtm_type = type;
-	msg->dhtm_ttl = htons(DHTM_TTL);
-	if ( node ) {
-		memcpy((char *) &msg->dhtm_node, (char *) node, sizeof(dhtnode));
-	} else {
-		memset((char *) &msg->dhtm_node, 0, sizeof(dhtnode_t));
-	}
 	return;
 }
 
 void dhtn::handlejoin(int sender, dhtmsg_t *dhtmsg) {
+	cout << "entering dhtn::handlejoin()...\n";
+	printFingers(&self, fingers);
+	
 	// TODO: subject to change
 	/* First check if the joining node's ID collides with predecessor or
 	 * self. If so, send back to joining node a REID message. */
 	int err;
-	dhtnode_t * joining = &dhtmsg->dhtm_node;
-	if ( joining->dhtn_ID == self.dhtn_ID || joining->dhtn_ID == pred.dhtn_ID ) {
+	dhtnode_t * joining = &(dhtmsg->dhtm_node);
+	dhtnode_t * pred = &(fingers[DHTN_FINGERS]);
+	if ( joining->dhtn_ID == self.dhtn_ID || joining->dhtn_ID == pred->dhtn_ID ) {
 		close(sender);
 		
-		dhemsg_t reidmsg;
+		dhtmsg_t reidmsg;
 		mkmsg( &reidmsg, DHTM_REID, NULL );
 		
-		int sd = connremote( &joining->dhtn_addr, joining->dhtn_port);
+		int sd = connremote(&(joining->dhtn_addr), joining->dhtn_port);
 		err = send(sd, (char *) &reidmsg, sizeof(dhtmsg_t), 0);
 		net_assert((err != sizeof(dhtmsg_t)), "dhtn::reud: send");
 		close(sd);
@@ -402,22 +432,27 @@ void dhtn::handlejoin(int sender, dhtmsg_t *dhtmsg) {
 	}
 	
 	// TODO: subject to change
-	if ( ID_inrange(joining->dhtn_ID, pred.dhtn_ID, self.dhtn_ID) ) {
+	if ( ID_inrange(joining->dhtn_ID, pred->dhtn_ID, self.dhtn_ID) ) {
 		close(sender);
 		
 		dhtmsg_t wlcmmsg;
 		mkmsg( &wlcmmsg, DHTM_WLCM, &self );
 		
 		int sd = connremote( &joining->dhtn_addr, joining->dhtn_port);
+		printf("sending wlcmmsg...\n");
 		err = send(sd, (char *) &wlcmmsg, sizeof(dhtmsg_t), 0);
 		net_assert((err != sizeof(dhtmsg_t)), "dhtn:wlcm: send");
-		err = send(sd, (char *) &pred, sizeof(dhtnode_t), 0);
+		printf("sending pred node...\n");
+		err = send(sd, (char *) pred, sizeof(dhtnode_t), 0);
 		net_assert((err != sizeof(dhtnode_t)), "dhtn:wlcm: send");
 		
-		memcpy((char *) &pred, (char *) joining, sizeof(dhtnode_t));
+		printf("updating pred node...\n");
+		memcpy((char *) pred, (char *) joining, sizeof(dhtnode_t));
 		if ( self.dhtn_ID == fingers[0].dhtn_ID ) {
-			memcpy((char *) &fingers[0], (char *) joining, sizeof(dhtnode_t));
+			memcpy((char *) &(fingers[0]), (char *) joining, sizeof(dhtnode_t));
 		}
+		
+		printFingers(&self, fingers);
 		close(sd);
 		return;
 	}
@@ -425,7 +460,7 @@ void dhtn::handlejoin(int sender, dhtmsg_t *dhtmsg) {
 	// TODO: subject to change
 	if ( dhtmsg->dhtm_type & DHTM_ATLOC ) {
 		dhtmsg_t redrtmsg;
-		mkmsg( &redrtmsg, DHTM_REDRT, &pred );
+		mkmsg( &redrtmsg, DHTM_REDRT, pred );
 		err = send(sender, (char *) &redrtmsg, sizeof(dhtmsg_t), 0);
 		net_assert((err != sizeof(dhtmsg_t)), "dhtn:redrt: send");
 		close(sender);
@@ -434,7 +469,7 @@ void dhtn::handlejoin(int sender, dhtmsg_t *dhtmsg) {
 	
 	// TODO: subject to change
 	close(sender);
-	forward(dhtmsg);
+	forward(joining->dhtn_ID, dhtmsg, sizeof(dhtmsg_t));
 	
 	return;
 }
@@ -451,9 +486,9 @@ void dhtn::handlesearch(int sender, dhtsrch_t * dhtsrch) {
  * call the appropriate packet handler.
  */
 void dhtn::handlepkt(int sender) {
+	cout << "entering dhtn::handlepkt()...\n";
 	dhtmsg_t dhtmsg;
 	int recvd = recvbysize(sender, (char *) &dhtmsg, sizeof(dhtmsg_t));
-	close(sender);
 	
 	if ( recvd > 0 ) {
 		net_assert((dhtmsg.dhtm_vers != NETIMG_VERS), "dhtn::join: bad version");
@@ -467,18 +502,22 @@ void dhtn::handlepkt(int sender) {
 			join();
 			
 		} else if (dhtmsg.dhtm_type & DHTM_JOIN) {
-			net_assert(!(pred.dhtn_port && fingers[0].dhtn_port),
+			net_assert(!(fingers[DHTN_FINGERS].dhtn_port && fingers[0].dhtn_port),
 				"dhtn::handlepkt: receive a JOIN when not yet integrated into the DHT.");
 			fprintf(stderr, "\tReceived JOIN (%d) from node %d\n",
 				ntohs(dhtmsg.dhtm_ttl), dhtmsg.dhtm_node.dhtn_ID);
-			handlejoin(sender, &dhtmsg);
+			handlejoin(sender, &dhtmsg);	// handlejoin is responsible for closing sender
 			
 		} else if (dhtmsg.dhtm_type & DHTM_WLCM) {
 			fprintf(stderr, "\tReceived WLCM from node %d\n", dhtmsg.dhtm_node.dhtn_ID);
-			fingers[0] = dhtmsg.dhtm_node;
-			int recvd = recvbysize(sender, (char *) &pred, sizeof(dhtnode_t));
+			// store successor node
+			memcpy((char *) &(fingers[0]), (char *) &(dhtmsg.dhtm_node), sizeof(dhtnode_t));
+			// receive predecessor node
+			recvd = recvbysize(sender, (char *) &(fingers[DHTN_FINGERS]), sizeof(dhtnode_t));
 			net_assert((recvd <= 0), "dhtn::handlepkt: welcome recv pred");
 			close(sender);
+			
+			printFingers(&self, fingers);
 			
 		} else {
 			net_assert((dhtmsg.dhtm_type & DHTM_REDRT),
@@ -543,7 +582,7 @@ int dhtn::mainloop() {
 			return 0;
 		} else if (c == 'p') {
 			fprintf(stderr, "Node ID: %d, pred: %d, succ: %d\n", self.dhtn_ID,
-				pred.dhtn_ID, fingers[0].dhtn_ID);
+				fingers[DHTN_FINGERS].dhtn_ID, fingers[0].dhtn_ID);
 		}
 		fflush(stdin);
 	}
@@ -562,11 +601,11 @@ int main( int argc, char * argv [] ) {
 	u_short cli_port;
 	int err, id, status;
 	
-	int sd, td;
+	//int sd, td;
 	imgdb imgdb;
-	iqry_t iqry;
-	int found;
-
+	//iqry_t iqry;
+	//int found;
+	
 #ifdef _WIN32
 	WSADATA wsa;
 	
@@ -579,19 +618,16 @@ int main( int argc, char * argv [] ) {
 #endif
 	
 	/* parse args */
-	int dhtn_args(int argc, char * argv[], 
-	char ** cli_fqdn, u_short * cli_port, int * id,
-	imgdb * imgdb)
 	if (dhtn_args( argc, argv, &cli_fqdn, &cli_port, &id, &imgdb)) {
 		dhtn_usage(argv[0]);
 	}
 
-	dhtn node(id, cli_fqdn, cli_port);	// initialize node, create listen socket
+	dhtn node(id, cli_fqdn, cli_port, NULL);	// initialize node, create listen socket
 	
 	if ( cli_fqdn ) {
 		node.join();	// join DHT if known host given
 	} else {
-		ndoe.first();	// else this is the first node on ID circle
+		node.first();	// else this is the first node on ID circle
 	}
 	
 	do {
@@ -603,3 +639,4 @@ int main( int argc, char * argv [] ) {
 #endif
 	exit(0);
 }
+
