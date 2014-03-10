@@ -32,8 +32,8 @@
 #define NETIMG_WIDTH  640
 #define NETIMG_HEIGHT 480
 
-#define NETIMG_MAXFNAME  256
-#define NETIMG_IDMAX     255 // 2^8 -1
+#define NETIMG_MAXFNAME  256  // including terminating NULL
+#define NETIMG_IDMAX     255  // 2^8 -1
 #define NETIMG_PORTSEP   ':'
 #define NETIMG_QLEN       10 
 #define NETIMG_LINGER      2
@@ -45,8 +45,8 @@
 
 typedef struct {
   unsigned char iq_vers;
-  unsigned char iq_namelen;
-  char iq_name[NETIMG_MAXFNAME];
+  unsigned char iq_type;
+  char iq_name[NETIMG_MAXFNAME];  // must be NULL terminated
 } iqry_t;
 
 typedef struct {

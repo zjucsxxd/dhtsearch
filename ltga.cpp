@@ -217,6 +217,8 @@ bool LTGA::LoadFromFile(const std::string &filename)
     }
     m_loaded = true;
 
+    file.close(); // close file SJ
+
     // swap BGR(A) to RGB(A)
 
     byte temp;
