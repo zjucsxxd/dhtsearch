@@ -55,7 +55,7 @@ using namespace std;
 /**************************TOOL FUNCTIONS***************************/
 void dhtn_usage(char *progname) {
 	//TODO
-	fprintf(stderr, "Usage: %s [-p <FQDN:port> -I nodeID]\n", progname);
+	fprintf(stderr, "Usage: %s [-p <FQDN:port> -I <nodeID> -i <imagefolder>]\n", progname);
 	exit(1);
 }
 
@@ -64,7 +64,7 @@ void dhtn_usage(char *progname) {
  */
 int dhtn_args(int argc, char * argv[], 
 	char ** cli_fqdn, u_short * cli_port, int * id,
-	imgdb * imgdb) {
+	char ** imgdb_folder) {
 	char c, *p;
 	extern char *optarg;
 	
@@ -74,7 +74,7 @@ int dhtn_args(int argc, char * argv[],
 	
 	*id = ((int) NETIMG_IDMAX) + 1;
 	
-	while ((c = getopt(argc, argv, "p:I:")) != EOF) {
+	while ((c = getopt(argc, argv, "p:I:i:")) != EOF) {
 		switch (c) {
 		case 'p':
 			for ( p = optarg + strlen(optarg) - 1;
@@ -91,6 +91,9 @@ int dhtn_args(int argc, char * argv[],
 			*id = atoi(optarg);
 			net_assert((*id < 0 || *id > ((int) NETIMG_IDMAX)), "dhtn_args: id out of range");
 			break;
+		case 'i':
+			*imgdb_folder = optarg;
+			break;
 		default:
 			return 1;
 			break;
@@ -98,7 +101,6 @@ int dhtn_args(int argc, char * argv[],
 	}
 	
 	return 0;
-	//return (imgdb->cli(argc, argv));
 }
 
 int recvbysize(int sd, char * buffer, unsigned int size) {
@@ -114,6 +116,13 @@ int recvbysize(int sd, char * buffer, unsigned int size) {
 	return recvd;
 }
 
+unsigned char getimgID(char * imgname) {
+	unsigned char md[SHA1_MDLEN];
+	SHA1((unsigned char*) imgname, strlen(imgname), md);	
+	unsigned char id = ID(md);
+	return id;
+}
+
 void mkmsg(dhtmsg_t * msg, int type, dhtnode_t * node, u_short ttl = DHTM_TTL) {
 	msg->dhtm_vers = NETIMG_VERS;
 	msg->dhtm_type = type;
@@ -123,6 +132,17 @@ void mkmsg(dhtmsg_t * msg, int type, dhtnode_t * node, u_short ttl = DHTM_TTL) {
 	} else {
 		memset((char *) &msg->dhtm_node, 0, sizeof(dhtnode_t));
 	}
+	return;
+}
+
+void mksrch(dhtsrch_t * srch, int type, dhtnode_t * node, char * imgname) {
+	dhtmsg_t * msg = (dhtmsg_t *) srch;
+	mkmsg(msg, type, node);
+	
+	unsigned char imgID = getimgID(imgname);
+	srch->dhts_imgID = imgID;
+	
+	memcpy((char *) srch->dhts_name, imgname, NETIMG_MAXFNAME);
 	return;
 }
 
@@ -267,6 +287,7 @@ dhtn::dhtn(int id, char *cli_fqdn, u_short cli_port, char * imagefolder) {
  */
 void dhtn::first() {
 	initFingers(&self, fingers);
+	dhtn_imgdb.loaddb();
 	return;
 }
 
@@ -324,7 +345,8 @@ int dhtn::connremote(struct in_addr *addr, u_short portnum) {
  */
 void dhtn::join() {
 	initFingers(&self, fingers);
-
+	dhtn_imgdb.loaddb();
+	
 	int sd, err;
 	dhtmsg_t dhtmsg;
 	
@@ -438,7 +460,7 @@ void dhtn::forward(unsigned char id, dhtmsg_t *dhtmsg, int size) {
 			fixup(j);
 			fixdn(j);
 			
-			printFingers(&self, fingers);
+			//printFingers(&self, fingers);
 			forward(id, dhtmsg, sizeof(dhtmsg_t));
 		}
 		
@@ -452,7 +474,7 @@ void dhtn::forward(unsigned char id, dhtmsg_t *dhtmsg, int size) {
 
 void dhtn::handlejoin(int sender, dhtmsg_t *dhtmsg) {
 	cout << "entering dhtn::handlejoin()...\n";
-	printFingers(&self, fingers);
+	//printFingers(&self, fingers);
 	
 	// TODO: subject to change
 	/* First check if the joining node's ID collides with predecessor or
@@ -498,7 +520,7 @@ void dhtn::handlejoin(int sender, dhtmsg_t *dhtmsg) {
 		}
 		fixdn(DHTN_FINGERS);
 		
-		printFingers(&self, fingers);
+		//printFingers(&self, fingers);
 		close(sd);
 		return;
 	}
@@ -567,7 +589,27 @@ void dhtn::handlepkt(int sender) {
 			fixdn(DHTN_FINGERS);
 			close(sender);
 			
-			printFingers(&self, fingers);
+			//printFingers(&self, fingers);
+			
+		} else if ( dhtmsg.dhtm_type & DHTM_FIND ) {
+			
+			//TODO
+			search_sd = sender;
+			iqry_t iqry;
+			memcpy((char *) &iqry, (char *) &dhtmsg, sizeof(dhtmsg_t));
+			
+			recvd = recvbysize(sender, (char *) &iqry + sizeof(dhtmsg_t), sizeof(iqry_t)-sizeof(dhtmsg_t));
+			net_assert((recvd <= 0), "dhtn::handlepkt: recv iqry");
+			int found = dhtn_imgdb.searchdb(iqry.iq_name);
+			sendimg(found);
+		
+		} else if ( dhtmsg.dhtm_type & DHTM_QUERY ) {
+			
+			//TODO
+			
+		} else if ( dhtmsg.dhtm_type & DHTM_REPLY ) {
+			
+			//TODO
 			
 		} else {
 			net_assert((dhtmsg.dhtm_type & DHTM_REDRT),
@@ -603,12 +645,73 @@ void dhtn::fixdn(int idx) {
 			memcpy((char *) &(fingers[k]), (char *) &(fingers[idx]), sizeof(dhtnode_t));
 		}
 	}
+	if ( idx == DHTN_FINGERS ) {
+		dhtn_imgdb.reloaddb(fingers[idx].dhtn_ID, self.dhtn_ID);
+	}
 	//printFingers(&self, fingers);
 	return;
 }
 
 // TODO
+/*
+ * sendimg: send the image to the client
+ * First send the specifics of the iamges (width, height, etc.)
+ * in an imsg_t packet to the client. The type imsg_t is defined in netimg.h.
+ * If "found" is > 0, send the image contained in imgdb. Otherwise, set the
+ * img_depth field of the imsg_t packet to 0 and send only the imsg_t packet.
+ * For debugging purposes if an image is send, it is send in chunks of segsize
+ * instead of as one single image. We're going to send the image slowly, one
+ * chunk for every NETIMG_USLEEP microseconds.
+ *
+ * Terminate process upon encountering any error.
+ * Doesn't otherwise modify anything
+ */
 void dhtn::sendimg(int found) {
+	int segsize;
+	char * ip;
+	int bytes;
+	long left;
+	imsg_t imsg;
+	double imgdsize;
+	long imgsize = 0L;
+	
+	imsg.im_vers = NETIMG_VERS;
+	
+	if ( found <= 0 ) {
+		if ( !found ) {
+			cerr << "Bloom filter missed." << endl;
+		} else {
+			cerr << "Bloom filter false positive." << endl;
+		}
+		imsg.im_depth = (unsigned char) 0;
+	} else {
+		imgdsize = dhtn_imgdb.marshall_imsg(&imsg);
+		net_assert((imgdsize > (double) LONG_MAX), "dhtn::sendimg: image too large");
+		imgsize = (long) imgdsize;
+		
+		imsg.im_width = htons(imsg.im_width);
+		imsg.im_height = htons(imsg.im_height);
+		imsg.im_format = htons(imsg.im_format);
+	}
+	
+	/*
+	 * Send the imsg packet to client connected to socket search_sd
+	 */
+	bytes = send(search_sd, (char *) &imsg, sizeof(imsg_t), 0);
+	net_assert((bytes != sizeof(imsg_t)), "dhtn::sendimg: send imsg");
+	
+	if ( found > 0 ) {
+		segsize = imgsize/NETIMG_NUMSEG;	/* compute segment size */
+		segsize = segsize < NETIMG_MSS ? NETIMG_MSS : segsize;	/* but don't let segment be too small */
+		ip = dhtn_imgdb.getimage();	/* ip points to the start of byte buffer holding image */
+		for ( left = imgsize; left; left -= bytes ) {
+			bytes = send(search_sd, (char *) ip, segsize > left ? left : segsize, 0);
+			net_assert((bytes < 0), "dhtn::sendimg: send image");
+			ip += bytes;
+			fprintf(stderr, "dhtn::sendimg: size %d, sent %d\n", (int) left, bytes);
+			usleep(NETIMG_USLEEP);
+		}
+	}
 	
 	return;
 }
@@ -665,13 +768,9 @@ int dhtn::mainloop() {
 int main( int argc, char * argv [] ) {
 	char * cli_fqdn = NULL;
 	u_short cli_port;
-	int err, id, status;
-	
-	//int sd, td;
-	imgdb imgdb;
-	//iqry_t iqry;
-	//int found;
-	
+	char * imagefolder = NULL;
+	int id, status;
+		
 #ifdef _WIN32
 	WSADATA wsa;
 	
@@ -684,11 +783,11 @@ int main( int argc, char * argv [] ) {
 #endif
 	
 	/* parse args */
-	if (dhtn_args( argc, argv, &cli_fqdn, &cli_port, &id, &imgdb)) {
+	if (dhtn_args( argc, argv, &cli_fqdn, &cli_port, &id, &imagefolder)) {
 		dhtn_usage(argv[0]);
 	}
 
-	dhtn node(id, cli_fqdn, cli_port, NULL);	// initialize node, create listen socket
+	dhtn node(id, cli_fqdn, cli_port, imagefolder);	// initialize node, create listen socket
 	
 	if ( cli_fqdn ) {
 		node.join();	// join DHT if known host given
