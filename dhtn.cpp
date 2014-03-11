@@ -114,16 +114,44 @@ int recvbysize(int sd, char * buffer, unsigned int size) {
 	return recvd;
 }
 
-void mkmsg(dhtmsg_t * msg, int type, dhtnode_t * node) {
+void mkmsg(dhtmsg_t * msg, int type, dhtnode_t * node, u_short ttl = DHTM_TTL) {
 	msg->dhtm_vers = NETIMG_VERS;
 	msg->dhtm_type = type;
-	msg->dhtm_ttl = htons(DHTM_TTL);
+	msg->dhtm_ttl = htons(ttl);
 	if ( node ) {
 		memcpy((char *) &msg->dhtm_node, (char *) node, sizeof(dhtnode_t));
 	} else {
 		memset((char *) &msg->dhtm_node, 0, sizeof(dhtnode_t));
 	}
 	return;
+}
+
+void initFingers(dhtnode_t *self, dhtnode_t fingers[]) {
+	for ( int i = 0; i < DHTN_FINGERS+1; i++ ) {
+		memcpy((char *) &(fingers[i]), (char *) self, sizeof(dhtnode_t));
+	}
+	return;
+}
+
+void calcfID(unsigned char id, unsigned char fID[]) {
+	unsigned char pow = 1;
+	for ( int i = 0; i < DHTN_FINGERS; i++ ) {
+		fID[i] = (id + pow) % (NETIMG_IDMAX+1);
+		pow *= 2;
+	}
+	return;
+}
+
+int getForwardIdx(unsigned char selfID, unsigned char fID[], int joinID) {
+	int found = 0;
+	int idx = 0;
+	for ( int i = DHTN_FINGERS-1; i > 0 && !found; i-- ) {
+		if (ID_inrange(fID[i], selfID, joinID)) {
+			idx = i;
+			found = 1;
+		}
+	}
+	return idx;
 }
 
 void printFingers(dhtnode_t * self, dhtnode_t fingers[]) {
@@ -203,6 +231,8 @@ void dhtn::setID(int id) {
 		self.dhtn_ID = (unsigned char) id;
 	}
 	
+	calcfID(self.dhtn_ID, fID);
+	
 	/* inform user which port this node is listening on */
 	fprintf(stderr, "DHT node ID %d address is %s:%d\n", self.dhtn_ID, sname, ntohs(self.dhtn_port));
 	
@@ -224,15 +254,8 @@ dhtn::dhtn(int id, char *cli_fqdn, u_short cli_port, char * imagefolder) {
 	setID(id);
 	for ( int i = 0; i < DHTN_FINGERS+1; i++ ) {
 		fingers[i].dhtn_port = 0;
-		fingers[i].dhtn_ID = 0;
 	}
 
-	int pow = 1;
-	for ( int i = 0; i < DHTN_FINGERS; i++ ) {
-		fID[i] = pow;
-		pow *= 2;
-	}
-	
 	//dhtn_imgdb.setfolder(imagefolder);
 	
 	return;
@@ -243,11 +266,7 @@ dhtn::dhtn(int id, char *cli_fqdn, u_short cli_port, char * imagefolder) {
  * Set both predecessor and successor (fingers[0]) to be "self".
  */
 void dhtn::first() {
-	cout << "entering dhtn::first()...\n";
-	for ( int i = 0; i < DHTN_FINGERS+1; i++ ) {
-		memcpy((char *) &(fingers[i]), (char *) &self, sizeof(dhtnode_t));
-	}
-	//printFingers(&self, fingers);
+	initFingers(&self, fingers);
 	return;
 }
 
@@ -304,17 +323,20 @@ int dhtn::connremote(struct in_addr *addr, u_short portnum) {
  * in the command line. It sends a join message to the provided host.
  */
 void dhtn::join() {
+	initFingers(&self, fingers);
+
 	int sd, err;
 	dhtmsg_t dhtmsg;
 	
 	sd = connremote(NULL, port);
 	
 	/* send join message */
-	dhtmsg.dhtm_vers = NETIMG_VERS;
+	mkmsg(&dhtmsg, DHTM_JOIN, &self);
+	/*dhtmsg.dhtm_vers = NETIMG_VERS;
 	dhtmsg.dhtm_type = DHTM_JOIN;
 	dhtmsg.dhtm_ttl = htons(DHTM_TTL);
 	memcpy((char *) &dhtmsg.dhtm_node, (char *) &self, sizeof(dhtnode_t));
-	
+	*/
 	err = send(sd, (char *) &dhtmsg, sizeof(dhtmsg_t), 0);
 	net_assert((err != sizeof(dhtmsg_t)), "dhtn::join: send");
 	
@@ -372,18 +394,30 @@ void dhtn::forward(unsigned char id, dhtmsg_t *dhtmsg, int size) {
 		 * the JOIN message to that we expect it to be our successor. We do
 		 * this by setting the highest bit in the type field of the message
 		 * using DHTM_ATLOC. */
+		if ( ntohs(dhtmsg->dhtm_ttl) == 0 ) {
+			printf("ttl = 0, canceling forward...\n");
+			return;
+		}
+		
 		int err;
 		dhtmsg_t fwdmsg;
 		memcpy((char *) &fwdmsg, (char *) dhtmsg, sizeof(dhtmsg_t));
-		//dhtnode_t * joining = &dhtmsg->dhtm_node;
-		if (ID_inrange(/*joining->dhtn_ID*/id, self.dhtn_ID, fingers[0].dhtn_ID)) {
+		fwdmsg.dhtm_ttl = htons(ntohs(fwdmsg.dhtm_ttl)-1);
+		int j = 0;
+		if (ID_inrange(id, self.dhtn_ID, fingers[0].dhtn_ID)) {
 			fwdmsg.dhtm_type |= DHTM_ATLOC;
+		} else {
+			//TODO
+			/* instead of simply forwarding to the successor node, first find the 
+			 * largetst index, j, for which joining node's ID <= fID[j] < the node's
+			 * ID, in modulo arithmetic */
+			j = getForwardIdx(self.dhtn_ID, fID, id);	//TODO
 		}
-		
-		int sd = connremote(&(fingers[0].dhtn_addr), fingers[0].dhtn_port);
+		printf("forwarding to node %d...\n", fingers[j].dhtn_ID);
+		int sd = connremote(&(fingers[j].dhtn_addr), fingers[j].dhtn_port);
 		err = send(sd, (char *) &fwdmsg, sizeof(dhtmsg_t), 0);
 		net_assert((err != sizeof(dhtmsg_t)), "dhtn::forward: send");
-	
+		
 		/* After we've forwarded the message along, we don't immediately close
 		 * the connection as usual. Instead, we wait for any DHTM_REDRT message
 		 * telling us that we have overshot in our range expectation (see the
@@ -396,7 +430,15 @@ void dhtn::forward(unsigned char id, dhtmsg_t *dhtmsg, int size) {
 		int recvd = recvbysize(sd, (char *) &redrtmsg, sizeof(dhtmsg_t));
 		close(sd);
 		if ( recvd > 0 ) {
-			memcpy((char *) &fingers[0], (char *) &redrtmsg.dhtm_node, sizeof(dhtnode_t));
+			printf("receive redrtmsg...\n");
+			//TODO
+			/* instead of saving the returned node as the new successor, we save it 
+			 * in finger[j] */
+			memcpy((char *) &fingers[j], (char *) &redrtmsg.dhtm_node, sizeof(dhtnode_t));
+			fixup(j);
+			fixdn(j);
+			
+			printFingers(&self, fingers);
 			forward(id, dhtmsg, sizeof(dhtmsg_t));
 		}
 		
@@ -431,7 +473,7 @@ void dhtn::handlejoin(int sender, dhtmsg_t *dhtmsg) {
 		return;
 	}
 	
-	// TODO: subject to change
+	// TODO wlcm the joining node
 	if ( ID_inrange(joining->dhtn_ID, pred->dhtn_ID, self.dhtn_ID) ) {
 		close(sender);
 		
@@ -446,18 +488,22 @@ void dhtn::handlejoin(int sender, dhtmsg_t *dhtmsg) {
 		err = send(sd, (char *) pred, sizeof(dhtnode_t), 0);
 		net_assert((err != sizeof(dhtnode_t)), "dhtn:wlcm: send");
 		
+		// updating predecessor, call fixdn
 		printf("updating pred node...\n");
-		memcpy((char *) pred, (char *) joining, sizeof(dhtnode_t));
+		memcpy((char *) pred, (char *) joining, sizeof(dhtnode_t));	
 		if ( self.dhtn_ID == fingers[0].dhtn_ID ) {
+			printf("updating succ node...\n");
 			memcpy((char *) &(fingers[0]), (char *) joining, sizeof(dhtnode_t));
+			fixup(0);
 		}
+		fixdn(DHTN_FINGERS);
 		
 		printFingers(&self, fingers);
 		close(sd);
 		return;
 	}
 	
-	// TODO: subject to change
+	// TODO redrt the sender
 	if ( dhtmsg->dhtm_type & DHTM_ATLOC ) {
 		dhtmsg_t redrtmsg;
 		mkmsg( &redrtmsg, DHTM_REDRT, pred );
@@ -511,10 +557,14 @@ void dhtn::handlepkt(int sender) {
 		} else if (dhtmsg.dhtm_type & DHTM_WLCM) {
 			fprintf(stderr, "\tReceived WLCM from node %d\n", dhtmsg.dhtm_node.dhtn_ID);
 			// store successor node
+			printf("updating succ node...\n");
 			memcpy((char *) &(fingers[0]), (char *) &(dhtmsg.dhtm_node), sizeof(dhtnode_t));
+			fixup(0);
 			// receive predecessor node
+			printf("updating pred node...\n");
 			recvd = recvbysize(sender, (char *) &(fingers[DHTN_FINGERS]), sizeof(dhtnode_t));
 			net_assert((recvd <= 0), "dhtn::handlepkt: welcome recv pred");
+			fixdn(DHTN_FINGERS);
 			close(sender);
 			
 			printFingers(&self, fingers);
@@ -531,13 +581,29 @@ void dhtn::handlepkt(int sender) {
 
 // TODO
 void dhtn::fixup(int idx) {
-	
+	// just follow the instruction, totally no idea...
+	//cout << "entering dhtn::fixup()...\n";
+	int stop = 0;
+	for ( int k = idx+1; k < DHTN_FINGERS && !stop; k++ ) {
+		if (ID_inrange(fID[k], self.dhtn_ID, fingers[idx].dhtn_ID)) {
+			memcpy((char *) &(fingers[k]), (char *) &(fingers[idx]), sizeof(dhtnode_t));
+		} else {
+			stop = 1;
+		}
+	}
+	//printFingers(&self, fingers);
 	return;
 }
 
 // TODO
 void dhtn::fixdn(int idx) {
-	
+	//cout << "entering dhtn::fixdn()...\n";
+	for ( int k = idx-1; k >= 0; k-- ) {
+		if (ID_inrange(fingers[idx].dhtn_ID, fID[k], fingers[k].dhtn_ID)) {
+			memcpy((char *) &(fingers[k]), (char *) &(fingers[idx]), sizeof(dhtnode_t));
+		}
+	}
+	//printFingers(&self, fingers);
 	return;
 }
 
