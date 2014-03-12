@@ -116,9 +116,14 @@ int recvbysize(int sd, char * buffer, unsigned int size) {
 	return recvd;
 }
 
-unsigned char getimgID(char * imgname) {
-	unsigned char md[SHA1_MDLEN];
-	SHA1((unsigned char*) imgname, strlen(imgname), md);	
+unsigned char * getimgMD(char * fname) {
+	unsigned char * md = new unsigned char [SHA1_MDLEN];
+	SHA1((unsigned char *) fname, strlen(fname), md);
+	return md;
+}
+
+unsigned char getimgID(char * fname) {
+	unsigned char * md = getimgMD(fname);
 	unsigned char id = ID(md);
 	return id;
 }
@@ -354,11 +359,6 @@ void dhtn::join() {
 	
 	/* send join message */
 	mkmsg(&dhtmsg, DHTM_JOIN, &self);
-	/*dhtmsg.dhtm_vers = NETIMG_VERS;
-	dhtmsg.dhtm_type = DHTM_JOIN;
-	dhtmsg.dhtm_ttl = htons(DHTM_TTL);
-	memcpy((char *) &dhtmsg.dhtm_node, (char *) &self, sizeof(dhtnode_t));
-	*/
 	err = send(sd, (char *) &dhtmsg, sizeof(dhtmsg_t), 0);
 	net_assert((err != sizeof(dhtmsg_t)), "dhtn::join: send");
 	
@@ -406,67 +406,61 @@ int dhtn:: acceptconn() {
  * to a dhtmsg_t. So the third argument tells the actual size of
  * the packet pointed to by the second argument.
  */
-void dhtn::forward(unsigned char id, dhtmsg_t *dhtmsg, int size) {
+void dhtn::forward(unsigned char id, dhtmsg_t * dhtmsg, int size) {
 	cout << "entering dhtn::forward()...\n";
-	if ( size == sizeof(dhtmsg_t) ) {
-		//TODO: subject to change
-		/* First check whether we expect the joining node's ID, as contained
-		 * in the JOIN message, to fall within the range (self.dhtn_ID, 
-		 * fingers[0].dhtn_ID]. If so, we inform the node we are sending
-		 * the JOIN message to that we expect it to be our successor. We do
-		 * this by setting the highest bit in the type field of the message
-		 * using DHTM_ATLOC. */
-		if ( ntohs(dhtmsg->dhtm_ttl) == 0 ) {
-			printf("ttl = 0, canceling forward...\n");
-			return;
-		}
+	//TODO: subject to change
+	/* First check whether we expect the joining node's ID, as contained
+	 * in the JOIN message, to fall within the range (self.dhtn_ID, 
+	 * fingers[0].dhtn_ID]. If so, we inform the node we are sending
+	 * the JOIN message to that we expect it to be our successor. We do
+	 * this by setting the highest bit in the type field of the message
+	 * using DHTM_ATLOC. */
+	if ( ntohs(dhtmsg->dhtm_ttl) == 0 ) {
+		printf("ttl = 0, canceling forward...\n");
+		return;
+	}
+	
+	int err;
+	
+	dhtmsg->dhtm_ttl = htons(ntohs(dhtmsg->dhtm_ttl)-1);
+	
+	int j = 0;
+	if (ID_inrange(id, self.dhtn_ID, fingers[0].dhtn_ID)) {
+		dhtmsg->dhtm_type |= DHTM_ATLOC;
+	} else {
+		//TODO
+		/* instead of simply forwarding to the successor node, first find the 
+		 * largetst index, j, for which joining node's ID <= fID[j] < the node's
+		 * ID, in modulo arithmetic */
+		j = getForwardIdx(self.dhtn_ID, fID, id);
+	}
+	printf("forwarding to node %d...\n", fingers[j].dhtn_ID);
+	int sd = connremote(&(fingers[j].dhtn_addr), fingers[j].dhtn_port);
+	err = send(sd, (char *) dhtmsg, (unsigned int) size, 0);
+	net_assert((err != (unsigned int) size), "dhtn::forward: send");
+	
+	/* After we've forwarded the message along, we don't immediately close
+	 * the connection as usual. Instead, we wait for any DHTM_REDRT message
+	 * telling us that we have overshot in our range expectation (see the
+	 * third case in dhtn::handlejoin()). Such a message comes with a 
+	 * suggested new successor, we copy this suggested new successor to 
+	 * our fingers[0] and try to forward the JOIN message again to the 
+	 * new successor. We repeat this until we stop getting DHTM_REDRT
+	 * message. */
+	dhtmsg_t redrtmsg;
+	int recvd = recvbysize(sd, (char *) &redrtmsg, sizeof(dhtmsg_t));
+	close(sd);
+	if ( recvd > 0 ) {
+		printf("receive redrtmsg...\n");
+		//TODO
+		/* instead of saving the returned node as the new successor, we save it 
+		 * in finger[j] */
+		memcpy((char *) &fingers[j], (char *) &redrtmsg.dhtm_node, sizeof(dhtnode_t));
+		fixup(j);
+		fixdn(j);
 		
-		int err;
-		dhtmsg_t fwdmsg;
-		memcpy((char *) &fwdmsg, (char *) dhtmsg, sizeof(dhtmsg_t));
-		fwdmsg.dhtm_ttl = htons(ntohs(fwdmsg.dhtm_ttl)-1);
-		int j = 0;
-		if (ID_inrange(id, self.dhtn_ID, fingers[0].dhtn_ID)) {
-			fwdmsg.dhtm_type |= DHTM_ATLOC;
-		} else {
-			//TODO
-			/* instead of simply forwarding to the successor node, first find the 
-			 * largetst index, j, for which joining node's ID <= fID[j] < the node's
-			 * ID, in modulo arithmetic */
-			j = getForwardIdx(self.dhtn_ID, fID, id);	//TODO
-		}
-		printf("forwarding to node %d...\n", fingers[j].dhtn_ID);
-		int sd = connremote(&(fingers[j].dhtn_addr), fingers[j].dhtn_port);
-		err = send(sd, (char *) &fwdmsg, sizeof(dhtmsg_t), 0);
-		net_assert((err != sizeof(dhtmsg_t)), "dhtn::forward: send");
-		
-		/* After we've forwarded the message along, we don't immediately close
-		 * the connection as usual. Instead, we wait for any DHTM_REDRT message
-		 * telling us that we have overshot in our range expectation (see the
-		 * third case in dhtn::handlejoin()). Such a message comes with a 
-		 * suggested new successor, we copy this suggested new successor to 
-		 * our fingers[0] and try to forward the JOIN message again to the 
-		 * new successor. We repeat this until we stop getting DHTM_REDRT
-		 * message. */
-		dhtmsg_t redrtmsg;
-		int recvd = recvbysize(sd, (char *) &redrtmsg, sizeof(dhtmsg_t));
-		close(sd);
-		if ( recvd > 0 ) {
-			printf("receive redrtmsg...\n");
-			//TODO
-			/* instead of saving the returned node as the new successor, we save it 
-			 * in finger[j] */
-			memcpy((char *) &fingers[j], (char *) &redrtmsg.dhtm_node, sizeof(dhtnode_t));
-			fixup(j);
-			fixdn(j);
-			
-			//printFingers(&self, fingers);
-			forward(id, dhtmsg, sizeof(dhtmsg_t));
-		}
-		
-	} else if ( size == sizeof(dhtsrch_t) ) {
-		dhtsrch_t * dhtsrch = (dhtsrch_t *) dhtmsg;
-		
+		//printFingers(&self, fingers);
+		forward(id, dhtmsg, size);
 	}
 	
 	return;
@@ -476,7 +470,6 @@ void dhtn::handlejoin(int sender, dhtmsg_t *dhtmsg) {
 	cout << "entering dhtn::handlejoin()...\n";
 	//printFingers(&self, fingers);
 	
-	// TODO: subject to change
 	/* First check if the joining node's ID collides with predecessor or
 	 * self. If so, send back to joining node a REID message. */
 	int err;
@@ -495,7 +488,7 @@ void dhtn::handlejoin(int sender, dhtmsg_t *dhtmsg) {
 		return;
 	}
 	
-	// TODO wlcm the joining node
+	// wlcm the joining node
 	if ( ID_inrange(joining->dhtn_ID, pred->dhtn_ID, self.dhtn_ID) ) {
 		close(sender);
 		
@@ -525,7 +518,7 @@ void dhtn::handlejoin(int sender, dhtmsg_t *dhtmsg) {
 		return;
 	}
 	
-	// TODO redrt the sender
+	// redrt the sender
 	if ( dhtmsg->dhtm_type & DHTM_ATLOC ) {
 		dhtmsg_t redrtmsg;
 		mkmsg( &redrtmsg, DHTM_REDRT, pred );
@@ -535,7 +528,7 @@ void dhtn::handlejoin(int sender, dhtmsg_t *dhtmsg) {
 		return;
 	}
 	
-	// TODO: subject to change
+	// subject to change
 	close(sender);
 	forward(joining->dhtn_ID, dhtmsg, sizeof(dhtmsg_t));
 	
@@ -544,6 +537,63 @@ void dhtn::handlejoin(int sender, dhtmsg_t *dhtmsg) {
 
 // TODO
 void dhtn::handlesearch(int sender, dhtsrch_t * dhtsrch) {
+	
+	cout << "entering dhtn::handlesearch()...\n";
+	
+	int err;
+	unsigned char imgID = dhtsrch->dhts_imgID;
+	char * imgname = dhtsrch->dhts_name;
+	dhtnode_t * originator = &(dhtsrch->dhts_msg.dhtm_node);
+	dhtnode_t * pred = &(fingers[DHTN_FINGERS]);	
+	
+	printf("searching for image %s(%d)...\n", imgname, imgID);
+	if ( dhtn_imgdb.searchdb(imgname) > 0 ) {
+		// queried image is in local database or has been cached
+		close(sender);
+		
+		dhtsrch_t rplymsg;
+		mksrch( &rplymsg, DHTM_REPLY, NULL, imgname );
+		
+		int sd = connremote( &originator->dhtn_addr, originator->dhtn_port);
+		printf("sending rplymsg(REPLY)...\n");
+		err = send(sd, (char *) &rplymsg, sizeof(dhtsrch_t), 0);
+		net_assert((err != sizeof(dhtsrch_t)), "dhtn:reply: send");
+		
+		close(sd);
+		return;
+	}
+	
+	if ( ID_inrange(imgID, pred->dhtn_ID, self.dhtn_ID) ) {
+		// queried image is within range but not found
+		close(sender);
+		
+		dhtsrch_t rplymsg;
+		mksrch( &rplymsg, DHTM_MISS, NULL, imgname );
+		
+		int sd = connremote( &originator->dhtn_addr, originator->dhtn_port);
+		printf("sending rplymsg(MISS)...\n");
+		err = send(sd, (char *) &rplymsg, sizeof(dhtsrch_t), 0);
+		net_assert((err != sizeof(dhtsrch_t)), "dhtn:reply: send");
+		
+		close(sd);
+		return;
+	}
+	
+	if ( dhtsrch->dhts_msg.dhtm_type & DHTM_ATLOC ) {
+		/* if the queried image ID is not within range, but the sender expected
+		 * it to be within range, send back a DHTM_REDRT message */
+		dhtmsg_t redrtmsg;
+		mkmsg( &redrtmsg, DHTM_REDRT, pred );
+		printf("sending redrtmsg...\n");
+		err = send(sender, (char *) &redrtmsg, sizeof(dhtmsg_t), 0);
+		net_assert((err != sizeof(dhtmsg_t)), "dhtn:redrt: send");
+		
+		close(sender);
+		return;
+	}
+	
+	close(sender);
+	forward(imgID, (dhtmsg_t *) dhtsrch, sizeof(dhtsrch_t));
 	
 	return;
 }
@@ -569,13 +619,6 @@ void dhtn::handlepkt(int sender) {
 			reID();
 			join();
 			
-		} else if (dhtmsg.dhtm_type & DHTM_JOIN) {
-			net_assert(!(fingers[DHTN_FINGERS].dhtn_port && fingers[0].dhtn_port),
-				"dhtn::handlepkt: receive a JOIN when not yet integrated into the DHT.");
-			fprintf(stderr, "\tReceived JOIN (%d) from node %d\n",
-				ntohs(dhtmsg.dhtm_ttl), dhtmsg.dhtm_node.dhtn_ID);
-			handlejoin(sender, &dhtmsg);	// handlejoin is responsible for closing sender
-			
 		} else if (dhtmsg.dhtm_type & DHTM_WLCM) {
 			fprintf(stderr, "\tReceived WLCM from node %d\n", dhtmsg.dhtm_node.dhtn_ID);
 			// store successor node
@@ -591,26 +634,76 @@ void dhtn::handlepkt(int sender) {
 			
 			//printFingers(&self, fingers);
 			
+		} else if (dhtmsg.dhtm_type & DHTM_JOIN) {
+			net_assert(!(fingers[DHTN_FINGERS].dhtn_port && fingers[0].dhtn_port),
+				"dhtn::handlepkt: receive a JOIN when not yet integrated into the DHT.");
+			fprintf(stderr, "\tReceived JOIN (%d) from node %d\n",
+				ntohs(dhtmsg.dhtm_ttl), dhtmsg.dhtm_node.dhtn_ID);
+			handlejoin(sender, &dhtmsg);	// handlejoin is responsible for closing sender
+			
 		} else if ( dhtmsg.dhtm_type & DHTM_FIND ) {
 			
 			//TODO
-			search_sd = sender;
+			/* when you receive a DHTM_FIND packet from a client, you first
+			 * search your local database and cache for the image */
 			iqry_t iqry;
 			memcpy((char *) &iqry, (char *) &dhtmsg, sizeof(dhtmsg_t));
 			
-			recvd = recvbysize(sender, (char *) &iqry + sizeof(dhtmsg_t), sizeof(iqry_t)-sizeof(dhtmsg_t));
+			recvd = recvbysize(sender, (char *) &iqry+sizeof(dhtmsg_t), sizeof(iqry_t)-sizeof(dhtmsg_t));
 			net_assert((recvd <= 0), "dhtn::handlepkt: recv iqry");
+			
+			fprintf(stderr, "\tReceived FIND %s from client \n", iqry.iq_name);
+			search_sd = sender;
 			int found = dhtn_imgdb.searchdb(iqry.iq_name);
-			sendimg(found);
+			if ( found > 0 ) {
+				printf("target found in local database...\n");
+				sendimg(found);
+			} else {
+				
+				dhtsrch_t srch;
+				mksrch(&srch, DHTM_QUERY, &self, iqry.iq_name);
+				unsigned char id = getimgID(iqry.iq_name);
+				forward(id, (dhtmsg_t *)&srch, sizeof(dhtsrch_t));
+			}
 		
+		} else if ( dhtmsg.dhtm_type == DHTM_MISS ) {	
+			
+			//TODO
+			sendimg(0);
+			
+		} else if ( dhtmsg.dhtm_type == DHTM_REPLY ) {
+			
+			//TODO
+			dhtsrch_t rply;
+			memcpy((char *) &rply, (char *) &dhtmsg, sizeof(dhtmsg_t));
+			
+			recvd = recvbysize(sender, (char *) &rply+sizeof(dhtmsg_t), sizeof(dhtsrch_t)-sizeof(dhtmsg_t));
+			net_assert((recvd <= 0), "dhtn::handlepkt: recv reply");
+			
+			fprintf(stderr, "\tReceived REPLY of image %s\n", rply.dhts_name);
+			
+			unsigned char * md = getimgMD(rply.dhts_name);
+			unsigned char id = getimgID(rply.dhts_name);
+			dhtn_imgdb.loadimg(id, md, rply.dhts_name);
+			dhtn_imgdb.readimg(rply.dhts_name);
+			delete [] md;
+			
+			sendimg(1);
+			
 		} else if ( dhtmsg.dhtm_type & DHTM_QUERY ) {
 			
 			//TODO
+			dhtsrch_t srch;
+			memcpy((char *) &srch, (char *) &dhtmsg, sizeof(dhtmsg_t));
 			
-		} else if ( dhtmsg.dhtm_type & DHTM_REPLY ) {
+			recvd = recvbysize(sender, (char *) &srch+sizeof(dhtmsg_t), sizeof(dhtsrch_t)-sizeof(dhtmsg_t));
+			net_assert((recvd <= 0), "dhtn::handlepkt: recv dhtsrch");
 			
-			//TODO
-			
+			fprintf(stderr, "\tReceived QUERY(%d) from node %d\n",
+				ntohs(dhtmsg.dhtm_ttl), dhtmsg.dhtm_node.dhtn_ID);
+			handlesearch(sender, &srch);
+
+
 		} else {
 			net_assert((dhtmsg.dhtm_type & DHTM_REDRT),
 				"dhtn::handlepkt: overshoot message received out of band");
@@ -718,8 +811,7 @@ void dhtn::sendimg(int found) {
 
 // TODO
 void dhtn::sendREDRT(int sender, dhtmsg_t * dhtmsg, int size) {
-	
-	return;
+
 }
 
 /*
