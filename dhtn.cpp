@@ -116,6 +116,7 @@ int recvbysize(int sd, char * buffer, unsigned int size) {
 	return recvd;
 }
 
+// Caller is responsible to release memory of md!
 unsigned char * getimgMD(char * fname) {
 	unsigned char * md = new unsigned char [SHA1_MDLEN];
 	SHA1((unsigned char *) fname, strlen(fname), md);
@@ -125,6 +126,7 @@ unsigned char * getimgMD(char * fname) {
 unsigned char getimgID(char * fname) {
 	unsigned char * md = getimgMD(fname);
 	unsigned char id = ID(md);
+	delete [] md;
 	return id;
 }
 
@@ -682,6 +684,8 @@ void dhtn::handlepkt(int sender) {
 			
 			fprintf(stderr, "\tReceived REPLY of image %s\n", rply.dhts_name);
 			
+			// cache the queried image into local database
+			dhtn_imgdb.reloaddb(fingers[DHTN_FINGERS].dhtn_ID, self.dhtn_ID);	// is this really necessary?
 			unsigned char * md = getimgMD(rply.dhts_name);
 			unsigned char id = getimgID(rply.dhts_name);
 			dhtn_imgdb.loadimg(id, md, rply.dhts_name);
