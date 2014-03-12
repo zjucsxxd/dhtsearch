@@ -204,7 +204,7 @@ void printFingers(dhtnode_t * self, dhtnode_t fingers[]) {
  * Returns the bound socket id.
  */
 void dhtn::setID(int id) {
-	cout << "entering dhtn::setID()...\n";
+	//cout << "entering dhtn::setID()...\n";
 	int err, len;
 	struct sockaddr_in node;
 	char sname[NETIMG_MAXFNAME] = { 0 };
@@ -294,7 +294,7 @@ dhtn::dhtn(int id, char *cli_fqdn, u_short cli_port, char * imagefolder) {
  */
 void dhtn::first() {
 	initFingers(&self, fingers);
-	dhtn_imgdb.loaddb();
+	dhtn_imgdb.reloaddb(self.dhtn_ID, self.dhtn_ID);
 	return;
 }
 
@@ -352,7 +352,7 @@ int dhtn::connremote(struct in_addr *addr, u_short portnum) {
  */
 void dhtn::join() {
 	initFingers(&self, fingers);
-	dhtn_imgdb.loaddb();
+	//dhtn_imgdb.reloaddb(self.dhtn_ID, self.dhtn_ID);
 	
 	int sd, err;
 	dhtmsg_t dhtmsg;
@@ -409,7 +409,7 @@ int dhtn:: acceptconn() {
  * the packet pointed to by the second argument.
  */
 void dhtn::forward(unsigned char id, dhtmsg_t * dhtmsg, int size) {
-	cout << "entering dhtn::forward()...\n";
+	//cout << "entering dhtn::forward()...\n";
 	//TODO: subject to change
 	/* First check whether we expect the joining node's ID, as contained
 	 * in the JOIN message, to fall within the range (self.dhtn_ID, 
@@ -469,7 +469,7 @@ void dhtn::forward(unsigned char id, dhtmsg_t * dhtmsg, int size) {
 }
 
 void dhtn::handlejoin(int sender, dhtmsg_t *dhtmsg) {
-	cout << "entering dhtn::handlejoin()...\n";
+	//cout << "entering dhtn::handlejoin()...\n";
 	//printFingers(&self, fingers);
 	
 	/* First check if the joining node's ID collides with predecessor or
@@ -540,7 +540,7 @@ void dhtn::handlejoin(int sender, dhtmsg_t *dhtmsg) {
 // TODO
 void dhtn::handlesearch(int sender, dhtsrch_t * dhtsrch) {
 	
-	cout << "entering dhtn::handlesearch()...\n";
+	//cout << "entering dhtn::handlesearch()...\n";
 	
 	int err;
 	unsigned char imgID = dhtsrch->dhts_imgID;
@@ -606,7 +606,7 @@ void dhtn::handlesearch(int sender, dhtsrch_t * dhtsrch) {
  * call the appropriate packet handler.
  */
 void dhtn::handlepkt(int sender) {
-	cout << "entering dhtn::handlepkt()...\n";
+	//cout << "entering dhtn::handlepkt()...\n";
 	dhtmsg_t dhtmsg;
 	int recvd = recvbysize(sender, (char *) &dhtmsg, sizeof(dhtmsg_t));
 	
@@ -654,18 +654,22 @@ void dhtn::handlepkt(int sender) {
 			recvd = recvbysize(sender, (char *) &iqry+sizeof(dhtmsg_t), sizeof(iqry_t)-sizeof(dhtmsg_t));
 			net_assert((recvd <= 0), "dhtn::handlepkt: recv iqry");
 			
-			fprintf(stderr, "\tReceived FIND %s from client \n", iqry.iq_name);
+			fprintf(stderr, "\tReceived FIND %s(%d) from client \n", iqry.iq_name, getimgID(iqry.iq_name));
 			search_sd = sender;
 			int found = dhtn_imgdb.searchdb(iqry.iq_name);
 			if ( found > 0 ) {
+				
 				printf("target found in local database...\n");
 				sendimg(found);
-			} else {
+			} else if ( self.dhtn_ID != fingers[0].dhtn_ID ) {
 				
 				dhtsrch_t srch;
 				mksrch(&srch, DHTM_QUERY, &self, iqry.iq_name);
 				unsigned char id = getimgID(iqry.iq_name);
 				forward(id, (dhtmsg_t *)&srch, sizeof(dhtsrch_t));
+			} else {
+				
+				sendimg(0);
 			}
 		
 		} else if ( dhtmsg.dhtm_type == DHTM_MISS ) {	
@@ -685,7 +689,8 @@ void dhtn::handlepkt(int sender) {
 			fprintf(stderr, "\tReceived REPLY of image %s\n", rply.dhts_name);
 			
 			// cache the queried image into local database
-			dhtn_imgdb.reloaddb(fingers[DHTN_FINGERS].dhtn_ID, self.dhtn_ID);	// is this really necessary?
+			//dhtn_imgdb.reloaddb(fingers[DHTN_FINGERS].dhtn_ID, self.dhtn_ID);
+			//TODO How do you know that imgdb_size has not exceeded imgdb_maxdbsize?
 			unsigned char * md = getimgMD(rply.dhts_name);
 			unsigned char id = getimgID(rply.dhts_name);
 			dhtn_imgdb.loadimg(id, md, rply.dhts_name);
@@ -846,8 +851,12 @@ int dhtn::mainloop() {
 			fprintf(stderr, "Bye!\n");
 			return 0;
 		} else if (c == 'p') {
-			fprintf(stderr, "Node ID: %d, pred: %d, succ: %d\n", self.dhtn_ID,
-				fingers[DHTN_FINGERS].dhtn_ID, fingers[0].dhtn_ID);
+			fprintf(stderr, "Node ID: %d, fingers: ", self.dhtn_ID);
+			for ( int i = 0; i < DHTN_FINGERS; i++ ) {
+				fprintf(stderr, "%d:%d ", 
+					fID[i]%(NETIMG_IDMAX+1), fingers[i].dhtn_ID);
+			}
+			fprintf(stderr, "pred: %d\n", fingers[DHTN_FINGERS].dhtn_ID);
 		}
 		fflush(stdin);
 	}
