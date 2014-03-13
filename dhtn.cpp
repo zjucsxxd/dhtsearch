@@ -660,13 +660,19 @@ void dhtn::handlepkt(int sender) {
 			if ( found > 0 ) {
 				
 				printf("target found in local database...\n");
-				sendimg(found);
+				sendimg(found);	// sendimg is responsible for closing sender
+			
 			} else if ( self.dhtn_ID != fingers[0].dhtn_ID ) {
 				
 				dhtsrch_t srch;
 				mksrch(&srch, DHTM_QUERY, &self, iqry.iq_name);
 				unsigned char id = getimgID(iqry.iq_name);
-				forward(id, (dhtmsg_t *)&srch, sizeof(dhtsrch_t));
+				forward(id, (dhtmsg_t *)&srch, sizeof(dhtsrch_t));	
+				
+				/*
+				 * Do not close sender until we receive a response
+				 */
+				
 			} else {
 				
 				sendimg(0);
@@ -675,6 +681,7 @@ void dhtn::handlepkt(int sender) {
 		} else if ( dhtmsg.dhtm_type == DHTM_MISS ) {	
 			
 			//TODO
+			close(sender);
 			sendimg(0);
 			
 		} else if ( dhtmsg.dhtm_type == DHTM_REPLY ) {
@@ -687,16 +694,15 @@ void dhtn::handlepkt(int sender) {
 			net_assert((recvd <= 0), "dhtn::handlepkt: recv reply");
 			
 			fprintf(stderr, "\tReceived REPLY of image %s\n", rply.dhts_name);
+			close(sender);
 			
 			// cache the queried image into local database
-			//dhtn_imgdb.reloaddb(fingers[DHTN_FINGERS].dhtn_ID, self.dhtn_ID);
 			//TODO How do you know that imgdb_size has not exceeded imgdb_maxdbsize?
 			unsigned char * md = getimgMD(rply.dhts_name);
 			unsigned char id = getimgID(rply.dhts_name);
 			dhtn_imgdb.loadimg(id, md, rply.dhts_name);
 			dhtn_imgdb.readimg(rply.dhts_name);
 			delete [] md;
-			
 			sendimg(1);
 			
 		} else if ( dhtmsg.dhtm_type & DHTM_QUERY ) {
@@ -710,7 +716,7 @@ void dhtn::handlepkt(int sender) {
 			
 			fprintf(stderr, "\tReceived QUERY(%d) from node %d\n",
 				ntohs(dhtmsg.dhtm_ttl), dhtmsg.dhtm_node.dhtn_ID);
-			handlesearch(sender, &srch);
+			handlesearch(sender, &srch);	// handlesearch is responsible for closing sender
 
 
 		} else {
@@ -815,6 +821,7 @@ void dhtn::sendimg(int found) {
 		}
 	}
 	
+	close(search_sd);
 	return;
 }
 
